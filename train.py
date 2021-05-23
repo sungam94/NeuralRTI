@@ -14,6 +14,7 @@ import pytorch_lightning as pl
 from typing import Optional
 import utils
 
+
 class LpDataset(Dataset):
     reload = 1
     train_idx = None
@@ -30,12 +31,15 @@ class LpDataset(Dataset):
         self.split = split
 
         if LpDataset.reload:
+            ration_sum = sum(ratio)
+
             LpDataset.ratio = int(ratio[0] / ratio[1])
             # load all images from disk
             LpDataset.all_dir, LpDataset.all_rgb, LpDataset.img_wh = utils.load_lp_file(self.data_dir)
             LpDataset.n_l_dirs = len(LpDataset.all_dir)
             nl = LpDataset.n_l_dirs
-            LpDataset.num_test_img = int(nl // LpDataset.ratio)
+            part_size = nl // ration_sum
+            LpDataset.num_test_img = part_size * ratio[1]
             LpDataset.test_idx = np.random.choice(nl, LpDataset.num_test_img, replace=False)
             LpDataset.test_idx = np.sort(LpDataset.test_idx)
             LpDataset.train_idx = list(set(range(nl)) - set(LpDataset.test_idx))
@@ -63,7 +67,6 @@ class LpDataset(Dataset):
             n, c, h, w = self.test_rgb.size()
             self.test_rgb = self.test_rgb.permute(0, 3, 2, 1)  # leave in c h w for memory layout??
             self.test_rgb = torch.reshape(self.test_rgb, (n, w * h, c))
-            s = self.test_rgb.stride()
             self.test_dirs = [LpDataset.all_dir[i] for i in LpDataset.test_idx]
             self.test_dirs = torch.stack(self.test_dirs)
             assert self.test_dirs.size() == (LpDataset.num_test_img, 3)
@@ -73,9 +76,9 @@ class LpDataset(Dataset):
         if self.split == 'train':
             rnd_l_idx = torch.randint(0, LpDataset.num_train_img, (1,))
             gt = self.train_rgb[idx, (rnd_l_idx*3):(rnd_l_idx*3+3)],
-            return self.train_dirs[rnd_l_idx], self.train_rgb[idx], gt, idx
+            return self.train_dirs, self.train_rgb[idx], gt
         elif self.split == 'eval':
-            idx = torch.randint(0, LpDataset.num_train_img,(1,))
+            idx = torch.randint(0, LpDataset.num_train_img, (1,))
             return self.eval_dirs[idx], self.eval_rgb, idx
         elif self.split == 'test':
             return self.test_dirs[idx], self.test_rgb, idx
@@ -88,10 +91,10 @@ class LpDataset(Dataset):
         elif self.split == 'test':
             return LpDataset.num_test_img
 
-    def define_transforms(self):
-        # Not sure why this is not in __init__
-        self.transform = tv.ToTensor()
-
+    # def define_transforms(self):
+    #     # Not sure why this is not in __init__
+    #     self.transform = tv.ToTensor()
+    #
 
 class LpDataModule(pl.LightningDataModule):
     def __init__(self,
@@ -151,20 +154,20 @@ class NeuralRtiModule(pl.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        dir_batch, rgb_batch, gt_batch, pixel_idx = batch
-        rgb_out = []
-        for l_rgb, l_dir in zip(rgb_batch, dir_batch):
+        dir_batch, rgb_batch, gt_batch  = batch
+        for l_rgb, l_dirs in zip(rgb_batch, dir_batch):
+            rgb_pred = []
             l_rgb = torch.squeeze(l_rgb)
-            l_dir = torch.squeeze(l_dir)[:2]
             embedding = self(l_rgb)
-            embedding = torch.cat([embedding, l_dir], -1)
-            decoded = self.decoder(embedding)
-            rgb_out += [decoded]
-
-        rgb_out = torch.stack(rgb_out)
-        gt = torch.stack(gt_batch)
-        loss = F.mse_loss(rgb_out, gt)
-        self.log('loss', loss, on_step=True, prog_bar=True, logger=True)
+            for l_dir in l_dirs:
+                l_dir = torch.squeeze(l_dir)[:2]
+                latent_code = torch.cat([embedding, l_dir], -1)
+                decoded = self.decoder(latent_code)
+                rgb_pred += [decoded]
+            rgb_pred = torch.stack(rgb_pred)
+            gt = torch.reshape(l_rgb, rgb_pred.size())
+            loss = F.mse_loss(rgb_pred, gt)
+            self.log('loss', loss, on_step=True, prog_bar=True, logger=True)
 
     def validation_step(self, batch, batch_idx):
         # validation is run over whole Image Volume
@@ -185,7 +188,7 @@ class NeuralRtiModule(pl.LightningModule):
                 rgb_out += [decoded]
             img = torch.stack(rgb_out)
             img = torch.reshape(img, (LpDataset.img_wh[0], LpDataset.img_wh[1], 3))
-            img = img.permute(1,0,2).cpu().detach()
+            img = img.permute(1, 0, 2).cpu().detach()
 
             loss = F.mse_loss(img, gt)
             self.log('valid_loss', loss, on_step=True, prog_bar=True, logger=True)
@@ -202,7 +205,7 @@ class NeuralRtiModule(pl.LightningModule):
         self.log('test_loss', loss, on_step=True)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.05)
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.01)
         return optimizer
 
 
@@ -231,8 +234,8 @@ def train(args):
     # )
     trainer = pl.Trainer(
         max_epochs=args.num_epochs,
-        # auto_scale_batch_size=True,
-        auto_lr_find=True,
+        auto_scale_batch_size=True,
+        # auto_lr_find=True,
         # checkpoint_callback=checkpoint_callback,
         # resume_from_checkpoint=hparams.ckpt_path,
                       # logger=logger,
@@ -257,12 +260,12 @@ def train(args):
 if __name__ == '__main__':
     print(sys.argv)
     parser = ArgumentParser()
-    parser.add_argument('--batch_size', default=2, type=int)
+    parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--data_dir', type=str, default='/home/mk301/RTI/loewenkopf')
     parser.add_argument('--lp_name', type=str, default='dirs.lp')
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--num_gpus', type=int, default=1)
-    parser.add_argument(('--test_ratio'), type=tuple, default=(10, 1))
+    parser.add_argument('--test_ratio', type=tuple, default=(8, 2))
     # parser.add_argument('--check_val_every_n_epoch', type=int, default= 1)
 
     # parser = pl.Trainer.add_argparse_args(parser)
