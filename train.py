@@ -91,11 +91,6 @@ class LpDataset(Dataset):
         elif self.split == 'test':
             return LpDataset.num_test_img
 
-    # def define_transforms(self):
-    #     # Not sure why this is not in __init__
-    #     self.transform = tv.ToTensor()
-    #
-
 class LpDataModule(pl.LightningDataModule):
     def __init__(self,
                  batch_size: int = 1,
@@ -112,10 +107,10 @@ class LpDataModule(pl.LightningDataModule):
         self.data_test = LpDataset(split='test', ratio=self.ratio)
 
     def train_dataloader(self):
-        return DataLoader(self.data_train, pin_memory=True, shuffle=True, batch_size=self.batch_size)
+        return DataLoader(self.data_train, num_workers=8, pin_memory=True, shuffle=True, batch_size=self.batch_size)
 
     def val_dataloader(self):
-        return DataLoader(self.data_val, pin_memory=True, batch_size=1)
+        return DataLoader(self.data_val, pin_memory=True,num_workers=8, batch_size=1)
 
     def test_dataloader(self):
         return DataLoader(self.data_test, batch_size=1)
@@ -152,8 +147,8 @@ class NeuralRtiModule(pl.LightningModule):
         embedding = self.encoder(x)
         return embedding
 
-
     def training_step(self, batch, batch_idx):
+        train_loss = 0
         dir_batch, rgb_batch, gt_batch  = batch
         for l_rgb, l_dirs in zip(rgb_batch, dir_batch):
             rgb_pred = []
@@ -167,10 +162,13 @@ class NeuralRtiModule(pl.LightningModule):
             rgb_pred = torch.stack(rgb_pred)
             gt = torch.reshape(l_rgb, rgb_pred.size())
             loss = F.mse_loss(rgb_pred, gt)
-            self.log('loss', loss, on_step=True, prog_bar=True, logger=True)
+            train_loss += loss
+            self.log('train_loss', loss, on_step=True, prog_bar=True, logger=True)
+        return {'loss': train_loss}
 
     def validation_step(self, batch, batch_idx):
         # validation is run over whole Image Volume
+        val_loss = 0
         dir_batch, rgb_batch, light_idx = batch
         for iv, l_dir, idx in zip(rgb_batch, dir_batch, light_idx):
             iv = torch.squeeze(iv)
@@ -192,9 +190,11 @@ class NeuralRtiModule(pl.LightningModule):
 
             loss = F.mse_loss(img, gt)
             self.log('valid_loss', loss, on_step=True, prog_bar=True, logger=True)
+            val_loss += loss
             img = (img*255).numpy().astype(np.uint8)
             gt = (gt*255).numpy().astype(np.uint8)
             utils.plot_image_grid([img, gt], ncols=1)
+        return {'loss': val_loss}
 
     def test_step(self, batch, batch_idx):
         x, y = batch
@@ -205,37 +205,23 @@ class NeuralRtiModule(pl.LightningModule):
         self.log('test_loss', loss, on_step=True)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.01)
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.004)
         return optimizer
 
 
 def train(args):
     # net_module = NeuralRtiModule()
     print(args)
-
     dm = LpDataModule(
-        batch_size = args.batch_size,
-        ratio = args.test_ratio
+        batch_size=args.batch_size,
+        ratio=args.test_ratio
     )
-
     system = NeuralRtiModule(dm.data_train.num_train_img)
-
-    # checkpoint_callback = ModelCheckpoint(filepath=os.path.join(f'ckpts/{hparams.exp_name}',
-    #                                                             '{epoch:d}'),
-    #                                       monitor='val/loss',
-    #                                       mode='min',
-    #                                       save_top_k=5,)
-
-    # logger = TestTubeLogger(
-    #     save_dir="logs",
-    #     name=hparams.exp_name,
-    #     debug=True,
-    #     create_git_tag=False
-    # )
     trainer = pl.Trainer(
         max_epochs=args.num_epochs,
-        auto_scale_batch_size=True,
-        # auto_lr_find=True,
+        # auto_scale_batch_size=True,
+        auto_lr_find=True,
+
         # checkpoint_callback=checkpoint_callback,
         # resume_from_checkpoint=hparams.ckpt_path,
                       # logger=logger,
@@ -244,28 +230,23 @@ def train(args):
                       benchmark=True,
                       profiler="simple",
     )
-
     trainer.fit(system, dm)
+    lr_finder = trainer.tuner.lr_find(model)
+    lr_finder.results
 
-    # cli = MyLightningCLI(NeuralRtiModule, LpDataModule, seed_everything_default=1234)
-    # cli.trainer.test(cli.model, datamodule=cli.datamodule)
-
-
-# class MyLightningCLI(LightningCLI):
-#     def add_arguments_to_parser(self, parser):
-#         parser.add_argument('--data_dir', type=str, default='/home/mk301/RTI/loewenkopf')
-#         parser.add_argument('--lp_name', type=str, default='dirs.lp')
-#         parser.add_argument('--data.batch_size', type=int, default=1)
+    # Plot with
+    fig = lr_finder.plot(suggest=True)
+    fig.show()
 
 if __name__ == '__main__':
     print(sys.argv)
     parser = ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--data_dir', type=str, default='/home/mk301/RTI/loewenkopf')
     parser.add_argument('--lp_name', type=str, default='dirs.lp')
-    parser.add_argument('--num_epochs', type=int, default=100)
+    parser.add_argument('--num_epochs', type=int, default=1)
     parser.add_argument('--num_gpus', type=int, default=1)
-    parser.add_argument('--test_ratio', type=tuple, default=(8, 2))
+    parser.add_argument('--test_ratio', type=tuple, default=(1, 1))
     # parser.add_argument('--check_val_every_n_epoch', type=int, default= 1)
 
     # parser = pl.Trainer.add_argparse_args(parser)
