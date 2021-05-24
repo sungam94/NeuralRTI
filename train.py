@@ -24,6 +24,7 @@ class LpDataset(Dataset):
     num_test_img = None
     train_dirs = None
     n_l_dirs = None
+    h, w, n, c = None, None, None, None
 
     def __init__(self, split='train', ratio=(1, 1)):
         self.data_dir = args.data_dir
@@ -32,10 +33,10 @@ class LpDataset(Dataset):
 
         if LpDataset.reload:
             ration_sum = sum(ratio)
-
             LpDataset.ratio = int(ratio[0] / ratio[1])
             # load all images from disk
             LpDataset.all_dir, LpDataset.all_rgb, LpDataset.img_wh = utils.load_lp_file(self.data_dir)
+            h, w, n, c = LpDataset.all_rgb.size()
             LpDataset.n_l_dirs = len(LpDataset.all_dir)
             nl = LpDataset.n_l_dirs
             part_size = nl // ration_sum
@@ -50,9 +51,15 @@ class LpDataset(Dataset):
         if self.split == 'train':
             self.train_rgb = [LpDataset.all_rgb[i] for i in LpDataset.train_idx]
             self.train_rgb = torch.stack(self.train_rgb)
-            n, c, h, w = self.train_rgb.size()
-            self.train_rgb = self.train_rgb.permute(0, 1, 2, 3)
-            self.train_rgb = torch.reshape(self.train_rgb, (w * h, n*c))
+            nchw = self.train_rgb.size()
+            self.t_n, self.t_c, self.t_h, self.t_w = self.train_rgb.size()
+            sss = self.train_rgb.stride() # 8256, 2752, 64, 1)
+            self.train_rgb = self.train_rgb.permute(0, 2, 3, 1)
+            self.train_rgb = self.train_rgb.contiguous()
+            s = self.train_rgb.stride()  # (8256, 129, 3, 1)
+            self.train_rgb = torch.reshape(self.train_rgb, (self.t_n * self.t_h * self.t_w, self.t_c))
+            ss = self.train_rgb.stride() # (3, 1)
+            assert self.train_rgb.size() == (self.t_n * self.t_h * self.t_w, self.t_c)
         elif self.split == 'eval':
             self.eval_rgb = torch.stack([LpDataset.all_rgb[i] for i in LpDataset.train_idx])
             n, c, h, w = self.eval_rgb.size()
@@ -74,9 +81,14 @@ class LpDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.split == 'train':
-            rnd_l_idx = torch.randint(0, LpDataset.num_train_img, (1,))
-            gt = self.train_rgb[idx, (rnd_l_idx*3):(rnd_l_idx*3+3)],
-            return self.train_dirs, self.train_rgb[idx], gt
+            gt = self.train_rgb[idx]
+            dir_idx = (idx // (self.t_w * self.t_h ))
+            p_idx = idx // self.t_n
+            l_dir = self.train_dirs[dir_idx]
+            iv = self.train_rgb.view(self.t_n, self.t_h * self.t_w, 3)
+            iv = iv[:,p_idx,:].flatten()
+            return l_dir, iv, gt,  idx
+
         elif self.split == 'eval':
             idx = torch.randint(0, LpDataset.num_train_img, (1,))
             return self.eval_dirs[idx], self.eval_rgb, idx
@@ -85,7 +97,7 @@ class LpDataset(Dataset):
 
     def __len__(self):
         if self.split == 'train':
-            return LpDataset.img_wh[0] * LpDataset.img_wh[1]
+            return LpDataset.img_wh[0] * LpDataset.img_wh[1] * self.t_n
         elif self.split == 'eval':
             return 1
         elif self.split == 'test':
@@ -110,7 +122,7 @@ class LpDataModule(pl.LightningDataModule):
         return DataLoader(self.data_train, num_workers=8, pin_memory=True, shuffle=True, batch_size=self.batch_size)
 
     def val_dataloader(self):
-        return DataLoader(self.data_val, pin_memory=True,num_workers=8, batch_size=1)
+        return DataLoader(self.data_val, pin_memory=True, num_workers=8, batch_size=1)
 
     def test_dataloader(self):
         return DataLoader(self.data_test, batch_size=1)
@@ -149,18 +161,12 @@ class NeuralRtiModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         train_loss = 0
-        dir_batch, rgb_batch, gt_batch  = batch
-        for l_rgb, l_dirs in zip(rgb_batch, dir_batch):
-            rgb_pred = []
+        dir_batch, rgb_batch, gt_batch, idx  = batch
+        for l_rgb, l_dir, gt in zip(rgb_batch, dir_batch, gt_batch):
             l_rgb = torch.squeeze(l_rgb)
-            embedding = self(l_rgb)
-            for l_dir in l_dirs:
-                l_dir = torch.squeeze(l_dir)[:2]
-                latent_code = torch.cat([embedding, l_dir], -1)
-                decoded = self.decoder(latent_code)
-                rgb_pred += [decoded]
-            rgb_pred = torch.stack(rgb_pred)
-            gt = torch.reshape(l_rgb, rgb_pred.size())
+            embedding = self.forward(l_rgb)
+            latent_code = torch.cat([embedding, l_dir[:2]], -1)
+            rgb_pred = self.decoder(latent_code)
             loss = F.mse_loss(rgb_pred, gt)
             train_loss += loss
             self.log('train_loss', loss, on_step=True, prog_bar=True, logger=True)
@@ -180,7 +186,7 @@ class NeuralRtiModule(pl.LightningModule):
             l_dir = torch.squeeze(l_dir)[:2]
             rgb_out = []
             for rgb in iv:
-                embedding = self(rgb)
+                embedding = self.forward(rgb)
                 embedding = torch.cat([embedding, l_dir], -1)
                 decoded = self.decoder(embedding)
                 rgb_out += [decoded]
@@ -205,7 +211,7 @@ class NeuralRtiModule(pl.LightningModule):
         self.log('test_loss', loss, on_step=True)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.004)
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.01)
         return optimizer
 
 
@@ -221,7 +227,7 @@ def train(args):
         max_epochs=args.num_epochs,
         # auto_scale_batch_size=True,
         auto_lr_find=True,
-
+        val_check_interval=10000.0,
         # checkpoint_callback=checkpoint_callback,
         # resume_from_checkpoint=hparams.ckpt_path,
                       # logger=logger,
@@ -231,9 +237,8 @@ def train(args):
                       profiler="simple",
     )
     trainer.fit(system, dm)
-    lr_finder = trainer.tuner.lr_find(model)
-    lr_finder.results
-
+    lr_finder = trainer.tuner.lr_find(system)
+    print(lr_finder.results)
     # Plot with
     fig = lr_finder.plot(suggest=True)
     fig.show()
