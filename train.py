@@ -1,5 +1,5 @@
 import os.path
-import sys
+import sys, os
 
 import numpy as np
 import torch
@@ -17,7 +17,9 @@ from pytorch_lightning.loggers import WandbLogger
 from typing import Optional
 import metrics
 import utils
+import matplotlib.pyplot as plt
 
+# os.environ["WANDB_MODE"] = "dryrun"
 
 class LpDataset(Dataset):
     reload = 1
@@ -64,9 +66,9 @@ class LpDataset(Dataset):
             self.train_rgb = self.train_rgb.permute(0, 3, 2, 1)
             self.train_rgb = self.train_rgb.contiguous()
             self.train_rgb = torch.reshape(
-                self.train_rgb, (self.t_n * self.t_h * self.t_w, self.t_c)
+                self.train_rgb, (self.t_n, self.t_h * self.t_w, self.t_c)
             )
-            assert self.train_rgb.size() == (self.t_n * self.t_h * self.t_w, self.t_c)
+            assert self.train_rgb.size() == (self.t_n,  self.t_h * self.t_w, self.t_c)
         elif self.split == "eval":
             self.eval_rgb = torch.stack(
                 [LpDataset.all_rgb[i] for i in LpDataset.train_idx]
@@ -74,10 +76,6 @@ class LpDataset(Dataset):
             n, c, h, w = self.eval_rgb.size()
             self.eval_rgb = self.eval_rgb.permute(0, 3, 2, 1)
             self.eval_rgb = torch.reshape(self.eval_rgb, (n, w * h, c))
-            # train and eval share the same images and light directions.
-            # self.eval_dirs = [LpDataset.all_dir[i] for i in LpDataset.train_idx]
-            # self.eval_dirs = torch.stack(self.eval_dirs)
-            # assert self.eval_dirs.size() == (LpDataset.num_train_img, 3)
             assert self.eval_rgb.size() == (
                 LpDataset.num_train_img,
                 self.img_wh[0] * self.img_wh[1],
@@ -103,16 +101,10 @@ class LpDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.split == "train":
-            gt = self.train_rgb[idx]
-            dir_idx = idx // (self.t_w * self.t_h)
-            p_idx = idx // self.t_n
-            # p_idx = dir_idx
-            l_dir = self.trn_val_dirs[dir_idx]
-            indices = torch.Tensor([dir_idx, p_idx, idx])
-            iv = self.train_rgb.reshape(self.t_n, self.t_h * self.t_w, 3)
-            s = iv.stride()
-            iv = iv[:, p_idx, :].flatten()
-            return l_dir, iv, gt, indices
+            # p_idx = idx // self.t_n
+            l_dir = self.trn_val_dirs
+            iv = self.train_rgb[:, idx, :]
+            return l_dir, iv
 
         elif self.split == "eval":
             idx = torch.randint(0, LpDataset.num_train_img, (1,))
@@ -122,7 +114,7 @@ class LpDataset(Dataset):
 
     def __len__(self):
         if self.split == "train":
-            return LpDataset.img_wh[0] * LpDataset.img_wh[1] * self.t_n
+            return LpDataset.img_wh[0] * LpDataset.img_wh[1]
         elif self.split == "eval":
             return 1
         elif self.split == "test":
@@ -169,44 +161,49 @@ class NeuralRtiModule(pl.LightningModule):
         n_units = 3 * n_lights
         self.encoder = nn.Sequential(
             nn.Linear(n_units, n_units),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(n_units, n_units),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(n_units, n_coeff),
         )
         self.decoder = nn.Sequential(
             nn.Linear(n_coeff + 2, n_coeff + 2),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(n_coeff + 2, n_coeff + 2),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(n_coeff + 2, n_coeff + 2),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(n_coeff + 2, 3),
         )
 
-    def forward(self, x):
+    def forward(self, l_rgb, l_dirs):
         # in lightning, forward defines the prediction/inference actions
-        embedding = self.encoder(x)
-        return embedding
+        preds = []
+
+        for l_dir in l_dirs:
+            embedding = self.encoder(l_rgb)
+            l_dir = l_dir[:2]
+            latent_code = torch.cat([embedding, l_dir], -1)
+            rgb = self.decoder(latent_code)
+            preds += [rgb]
+        return torch.stack(preds)
+
 
     def training_step(self, batch, batch_idx):
         train_loss = []
-        dir_batch, rgb_batch, gt_batch, idx = batch
-        for l_rgb, l_dir, gt in zip(rgb_batch, dir_batch, gt_batch):
-            l_rgb = torch.squeeze(l_rgb)
-            embedding = self.forward(l_rgb)
-            latent_code = torch.cat([embedding, l_dir[:2]], -1)
-            rgb_pred = self.decoder(latent_code)
-            loss = F.mse_loss(rgb_pred, gt, reduction="mean")
+        dir_batch, rgb_batch = batch
+        for l_rgb, l_dirs in zip(rgb_batch, dir_batch):
+            l_rgb = l_rgb.flatten()
+            rgb_pred = self.forward(l_rgb, l_dirs)
+            loss = F.mse_loss(rgb_pred.flatten(), l_rgb, reduction="mean")
+            # loss = F.mse_loss(rgb_pred.flatten(), l_rgb, reduction="sum")
             train_loss += [loss]
             self.log("lr", utils.get_learning_rate(self.optimizer))
             self.log("global_step", self.global_step)
             self.log('loss', loss)
             self.log("train_loss", loss, on_step=True, prog_bar=True, logger=False)
-        # idx = idx.cpu().detach()
-        # idx = [i for i in idx.T.numpy().tolist()]
-        return {"loss": torch.mean(torch.stack(train_loss)),
-                "indices": idx}
+        return {"loss": torch.stack(train_loss)}
+        # return {"loss": torch.mean(torch.stack(train_loss))}
 
     # def training_step_end(self, outs):
     #     # log accuracy on each step_end, for compatibility with data-parallel
@@ -232,38 +229,38 @@ class NeuralRtiModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         val_loss = []
         val_psnr = []
-        dir_batch, rgb_batch, light_idx = batch
-        for iv, l_dir, idx in zip(rgb_batch, dir_batch, light_idx):
-            iv = torch.squeeze(iv)
-            gt_slice = iv[idx]
-            gt = torch.reshape(gt_slice, (LpDataset.img_wh[0], LpDataset.img_wh[1], 3))
-            gt = gt.permute(1, 0, 2).cpu().detach()
-            iv = iv.permute(1, 0, 2)
+        dir_batch, rgb_batch, idx = batch
+        for iv, l_dir in zip(rgb_batch, dir_batch):
+            gt_slice = iv[idx]  # at light index
+            gt_slice = torch.squeeze(gt_slice)
+            gt_slice = torch.reshape(gt_slice, (64, 43, 3))
+            gt_slice = gt_slice.permute(1, 0, 2).contiguous()
+            gt_slice = torch.reshape(gt_slice, (43, 64, 3))
+            gt_slice = gt_slice.cpu().detach()
+            iv = iv.permute(1, 0, 2).contiguous()
             iv = torch.reshape(
                 iv,
-                (
-                    LpDataset.img_wh[1] * LpDataset.img_wh[0],
-                    LpDataset.num_train_img * 3,
-                ),
-            )
-            l_dir = torch.squeeze(l_dir)[:2]
+                (LpDataset.img_wh[1] * LpDataset.img_wh[0], LpDataset.num_train_img * 3)    )
             rgb_out = []
-            for rgb in iv:
-                embedding = self.forward(rgb)
-                embedding = torch.cat([embedding, l_dir], -1)
-                decoded = self.decoder(embedding)
-                rgb_out += [decoded]
+
+            for iv_rgb in iv:
+                rgb = self.forward(iv_rgb, l_dir)
+                rgb_out += [rgb]
+
             img = torch.stack(rgb_out)
             img = torch.reshape(img, (LpDataset.img_wh[0], LpDataset.img_wh[1], 3))
             img = img.permute(1, 0, 2).cpu().detach()
-            psnr = metrics.psnr(img, gt)
-            loss = F.mse_loss(img, gt, reduction='mean')
+
+            psnr = metrics.psnr(img, gt_slice)
+            loss = F.mse_loss(img, gt_slice, reduction='mean')
             val_loss += [loss]
             val_psnr += [psnr]
+
             img_np = (img * 255).numpy().astype(np.uint8)
-            gt_np = (gt * 255).numpy().astype(np.uint8)
+            gt_np = (gt_slice * 255).numpy().astype(np.uint8)
             utils.plot_image_grid([img_np, gt_np], ncols=1)
-            log_imgs = torch.cat([img, gt], dim=0)
+
+            log_imgs = torch.cat([img, gt_slice], dim=0)
             log_imgs = log_imgs.permute(2, 0, 1).contiguous()
             caption = "Top: Prediction, Bottom: Ground Truth"
             self.log("global_step", self.global_step)
@@ -322,8 +319,8 @@ def train(args):
         max_epochs=args.num_epochs,
         # auto_scale_batch_size=True,
         # auto_lr_find=True,
-        val_check_interval=100000.0,
-        log_every_n_steps=300,
+        val_check_interval=200.0,
+        # log_every_n_steps=10,
         logger=wandb_logger,
         gpus=args.num_gpus,
         num_sanity_val_steps=2,
@@ -354,7 +351,7 @@ if __name__ == "__main__":
     parser.add_argument("--test_ratio", type=tuple, default=(10, 2))
     parser.add_argument("--key", type=str, default=None)
     parser.add_argument("--optimizer", type=str, default="radam")
-    parser.add_argument("--lr", type=float, default=0.0002)
+    parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--weight_decay", type=float, default=0.995)
     parser.add_argument("--decay_step", type=float, default=1)
     parser.add_argument("--decay_gamma", type=float, default=0.995)
