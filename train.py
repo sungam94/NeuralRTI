@@ -112,9 +112,12 @@ class LpDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.split == "train":
-            ray = self.train_rgb[idx, :]
+            t = idx % (self.t_n)
+            p = idx % (self.t_w * self.t_h)
+            ray = self.train_rgb[p, :]
+            gt = ray[t]
             assert len(ray) == self.num_train_img
-            return self.trn_val_dirs, ray
+            return self.trn_val_dirs[t], ray, gt
 
         elif self.split == "eval":
             l_idx = torch.randint(0, len(LpDataset.trn_val_dirs), (1,))
@@ -126,7 +129,7 @@ class LpDataset(Dataset):
 
     def __len__(self):
         if self.split == "train":
-            return LpDataset.img_wh[0] * LpDataset.img_wh[1] #* self.num_train_img
+            return LpDataset.img_wh[0] * LpDataset.img_wh[1] * self.num_train_img
         elif self.split == "eval":
             return 1
         elif self.split == "test":
@@ -205,26 +208,17 @@ class NeuralRtiModule(pl.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        ray_coll = []
-        dir_batch, rgb_batch = batch
-        for ray, l_dirs in zip(rgb_batch, dir_batch):
-            rgb_out = []
-            for l_dir in l_dirs:
-                rgb_pred = self.forward(l_dir, ray.flatten())
-                rgb_out += [rgb_pred]
-
-            rgb_out = torch.stack(rgb_out) # .squeeze().flatten()
-            # ray = ray.flatten()
-            ray_coll += [rgb_out]
-
-            loss = F.mse_loss(rgb_out.detach().flatten(), ray.detach().flatten(), reduction="mean")
+        dirs_batch, ray_batch, gt_batch = batch
+        # dir_batch, rgb_batch = batch
+        loss_batch = []
+        for l_dir,  ray, gt in zip(dirs_batch, ray_batch, gt_batch):
+            rgb_pred = self.forward(l_dir, ray.flatten())
+            loss = F.mse_loss(rgb_pred, gt, reduction="mean")
             self.log('loss', loss, on_step=True, prog_bar=True, logger=True)
             self.log("global_step", self.global_step)
+            loss_batch += [loss]
 
-        ray_coll = torch.stack(ray_coll)
-        loss = F.mse_loss(ray_coll.flatten(), rgb_batch.flatten(), reduction="mean")
-        # train_loss += [loss]
-
+        loss = torch.mean(torch.stack(loss_batch))
         self.log("lr", utils.get_learning_rate(self.optimizer))
         self.log('batch_loss', loss, on_step=True, prog_bar=True, logger=True)
         # batch_loss = torch.stack(train_loss).squeeze()
@@ -381,7 +375,7 @@ def train(args):
 if __name__ == "__main__":
     print(sys.argv)
     parser = ArgumentParser()
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--data_dir", type=str, default="/home/mag/RTI/loewenkopf")
     parser.add_argument("--root_dir", type=str, default="/home/mag/RTI/")
     parser.add_argument("--exp_name", type=str, default="loewenkopf_elu")
