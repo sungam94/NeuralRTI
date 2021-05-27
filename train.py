@@ -19,7 +19,7 @@ import metrics
 import utils
 import matplotlib.pyplot as plt
 
-# os.environ["WANDB_MODE"] = "dryrun"
+os.environ["WANDB_MODE"] = "dryrun"
 
 class LpDataset(Dataset):
     reload = 1
@@ -152,28 +152,37 @@ class LpDataModule(pl.LightningDataModule):
     def train_dataloader(self):
         return DataLoader(
             self.data_train,
-            num_workers=0,
+            num_workers=4,
             pin_memory=True,
             shuffle=True,
             batch_size=self.batch_size,
         )
 
     def val_dataloader(self):
-        return DataLoader(self.data_val, pin_memory=True, num_workers=0, batch_size=1)
+        return DataLoader(self.data_val,
+                          pin_memory=True,
+                          num_workers=4,
+                          batch_size=1)
 
     def test_dataloader(self):
-        return DataLoader(self.data_test, batch_size=1)
+        return DataLoader(self.data_test,
+                          batch_size=1)
 
 
 class NeuralRtiModule(pl.LightningModule):
     def __init__(self, args, n_lights):
         super().__init__()
+        print(f'MODEL ARGS: {args}')
+        print(f'MODEL HPARAMS: {self.hparams}')
+        self.hparams.lr = args.lr
+        print(f'MODEL HPARAMS: {self.hparams}')
+
         self.idx_col = []
         self.args = args
         self.save_hyperparameters()
         self.n_lights = n_lights
 
-        n_coeff = 9
+        n_coeff = args.n_coeff
         n_units = 3 * n_lights
         self.encoder = nn.Sequential(
             nn.Linear(n_units, n_units),
@@ -212,14 +221,16 @@ class NeuralRtiModule(pl.LightningModule):
         # dir_batch, rgb_batch = batch
         loss_batch = []
         for l_dir,  ray, gt in zip(dirs_batch, ray_batch, gt_batch):
+
             rgb_pred = self.forward(l_dir, ray.flatten())
             loss = F.mse_loss(rgb_pred, gt, reduction="mean")
+
             self.log('loss', loss, on_step=True, prog_bar=True, logger=True)
             self.log("global_step", self.global_step)
             loss_batch += [loss]
 
         loss = torch.mean(torch.stack(loss_batch))
-        self.log("lr", utils.get_learning_rate(self.optimizer))
+        self.log("lr", utils.get_learning_rate(self.trainer.optimizers[0]))
         self.log('batch_loss', loss, on_step=True, prog_bar=True, logger=True)
         # batch_loss = torch.stack(train_loss).squeeze()
         # batch_loss = torch.mean(batch_loss)
@@ -290,7 +301,8 @@ class NeuralRtiModule(pl.LightningModule):
             psnr = metrics.psnr(pred_img, img)
             val_psnr += [psnr.detach()]
 
-            img_np = (pred_img * 255).numpy().astype(np.uint8)
+            img_np = torch.clamp(pred_img, min=0.0, max=1.0)
+            img_np = (img_np * 255).numpy().astype(np.uint8)
             gt_np = (img * 255).numpy().astype(np.uint8)
             # utils.plot_image_grid([img_np, gt_np, dbg_img], ncols=1)
             utils.plot_image_grid([img_np, gt_np], ncols=1)
@@ -299,6 +311,7 @@ class NeuralRtiModule(pl.LightningModule):
             log_imgs = log_imgs.permute(2, 0, 1).contiguous()
             caption = "Top: Prediction, Bottom: Ground Truth"
 
+            # self.scheduler.step(loss)  # should be called by lightninig
             self.log("global_step", self.global_step)
             self.log("val_loss", loss)
             self.log("val_psnr", psnr)
@@ -307,6 +320,8 @@ class NeuralRtiModule(pl.LightningModule):
         #     "val_loss": torch.mean(torch.stack(val_loss)),
         #     "val_psnr": torch.mean(torch.stack(val_psnr)),
         # }
+
+
 
     def test_step(self, batch, batch_idx):
         x, y = batch
@@ -318,9 +333,22 @@ class NeuralRtiModule(pl.LightningModule):
 
     def configure_optimizers(self):
         # self.optimizer = torch.optim.Adam(self.parameters(), lr=0.01)
-        self.optimizer = utils.get_optimizer(self.args, [self])
-        scheduler = utils.get_scheduler(self.args, self.optimizer)
-        return [self.optimizer], [scheduler]
+
+        optimizer = utils.get_optimizer(self.args, [self])
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
+                                                               mode='min',
+                                                               factor=0.5,
+                                                               patience=1,
+                                                               verbose=True)
+
+        # scheduler = utils.get_scheduler(self.args, self.optimizer)
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': scheduler,
+                'monitor': 'val_loss',
+            }
+        }
 
 
 def train(args):
@@ -348,14 +376,15 @@ def train(args):
 
     rti_model = NeuralRtiModule(args, dm.data_train.num_train_img)
     wandb.watch(rti_model, log="all")
+    print (args)
     trainer = pl.Trainer(
         default_root_dir=args.root_dir,
         resume_from_checkpoint=args.ckpt_path,
         callbacks=[checkpoint_callback, lr_monitor],
         max_epochs=args.num_epochs,
-        # auto_scale_batch_size=True,
+        auto_scale_batch_size=True,
         # auto_lr_find=True,
-        val_check_interval=100.0,
+        val_check_interval=200.0,
         log_every_n_steps=1,
         logger=wandb_logger,
         gpus=args.num_gpus,
@@ -363,13 +392,15 @@ def train(args):
         # benchmark=True,
         # profiler="simple",
     )
+    # trainer.tune(rti_model, dm)
     trainer.fit(rti_model, dm)
     wandb.finish()
-
-    # lr_finder = trainer.tuner.lr_find(rti_model)
+    #
+    # lr_finder = trainer.tuner.lr_find(rti_model, min_lr=0.0005, max_lr=0.025)
     # print(lr_finder.results)
     # fig = lr_finder.plot(suggest=True)
     # fig.show()
+    # print(lr_finder.results[lr_finder._optimal_idx])
 
 
 if __name__ == "__main__":
@@ -382,17 +413,20 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt_path", type=str, default=None)
 
     parser.add_argument("--lp_name", type=str, default="dirs.lp")
-    parser.add_argument("--num_epochs", type=int, default=100)
+    parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--num_gpus", type=int, default=1)
     parser.add_argument("--test_ratio", type=tuple, default=(10, 2))
     parser.add_argument("--key", type=str, default=None)
     parser.add_argument("--optimizer", type=str, default="radam")
     parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--weight_decay", type=float, default=0.995)
-    parser.add_argument("--decay_gamma", type=float, default=0.995)
+    # parser.add_argument("--lr", type=float, default=0.0004)
+    parser.add_argument("--weight_decay", type=float, default=0.9)  # optimizer
+    parser.add_argument("--decay_gamma", type=float, default=0.95)
     parser.add_argument("--decay_step", type=float, default=1)
     parser.add_argument("--lr_scheduler", type=str, default="cosine")
+    parser.add_argument("--n_coeff", type=int, default=32)
     parser.add_argument("--warmup_epochs", type=int, default=0)
+
     # parser.add_argument('--check_val_every_n_epoch', type=int, default= 1)
 
     # parser = pl.Trainer.add_argparse_args(parser)
