@@ -1,14 +1,13 @@
 import os
-import numpy as np
 import torch
-from PIL import Image
 import torchvision as tv
 import matplotlib.pyplot as plt
 
 
 # optimizer
 from torch.optim import SGD, Adam
-from optimizers import *
+from ranger import Ranger
+from optimizers import RAdam
 # scheduler
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
 from warmup_scheduler import GradualWarmupScheduler
