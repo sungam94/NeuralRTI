@@ -1,0 +1,3 @@
+_target_: src.models.neuralrti_model.NeuralRtiModule
+
+n_lights: 200
