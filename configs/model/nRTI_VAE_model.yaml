@@ -1,0 +1,3 @@
+_target_: src.models.nRTI_VAE_model.nRtiVaeModule
+
+n_lights: 200

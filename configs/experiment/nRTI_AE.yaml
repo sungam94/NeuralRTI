@@ -1,0 +1,92 @@
+#@package _global_
+
+# to execute this experiment run:
+# python run.py experiment=example_simple.yaml
+
+defaults:
+  - override /trainer: null
+  - override /model: null
+  - override /datamodule: null
+  - override /callbacks: null
+  - override /logger: null
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+seed: 12345
+
+model:
+  _target_: src.models.neuralrti_model.NeuralRtiModule
+  n_lights: 200
+  n_coeff: 9
+  lr: 1e-5
+  optimizer: "radam"
+  weight_decay: 0.995
+  lr_scheduler: 'plateau'
+  monitor: 'val_psnr'
+  interval: 'epoch'
+  patience: 1
+  factor: 0.2
+  eps: 1e-8
+  min_lr: 1e-8
+  sch_freq: 1
+  warmup_epochs: 1
+  reduction: 'mean'
+
+
+trainer:
+  _target_: pytorch_lightning.Trainer
+  gpus: 1
+  min_epochs: 1
+  max_epochs: 10
+  gradient_clip_val: 0.5
+  fast_dev_run: False
+
+logger:
+  wandb:
+    _target_: pytorch_lightning.loggers.wandb.WandbLogger
+    project: "neuralRTI"
+    name: null
+    save_dir: "."
+    offline: False # set True to store all logs only locally
+    id: null # pass correct id to resume experiment!
+    # entity: ""  # set to name of your wandb team or just remove it
+    log_model: False
+    prefix: ""
+    job_type: "train"
+    group: ""
+    tags: [ ]
+
+
+callbacks:
+  model_checkpoint:
+    _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    monitor: "val_psnr" # name of the logged metric which determines when model is improving
+    save_top_k: 1 # save k best models (determined by above metric)
+    save_last: True # additionaly always save model from last epoch
+    mode: "max" # can be "max" or "min"
+    verbose: True
+    dirpath: "checkpoints/"
+    filename: "{epoch:02d}"
+
+  early_stopping:
+    _target_: pytorch_lightning.callbacks.EarlyStopping
+    monitor: "val_psnr" # name of the logged metric which determines when model is improving
+    patience: 3 # how many epochs of not improving until training stops
+    mode: "max" # can be "max" or "min"
+    min_delta: 0 # minimum change in the monitored metric needed to qualify as an improvement
+
+
+
+
+datamodule:
+  _target_: src.datamodules.rti_datamodule.LpDataModule
+  data_dir: ${work_dir}/data
+  lp_name: "dirs.lp"
+  batch_size: 64
+  train_val_test_split:
+    - 10
+    - 2
+  num_workers: 8
+  pin_memory: False
+
