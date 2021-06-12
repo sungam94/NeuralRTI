@@ -8,7 +8,7 @@ from pytorch_lightning import LightningModule
 from src.utils import my_utils, metrics
 
 from src.datamodules.datasets.lp_rti_dataset import LpDataset
-from src.models.modules.rti_autoencoder import NeuralRtiEncoder, NeuralRtiDecoder
+from src.models.modules.rti_autoencoder import NeuralRtiEncoderVae, NeuralRtiDecoderVae
 
 
 class NrtiVaeModule(LightningModule, ABC):
@@ -20,10 +20,10 @@ class NrtiVaeModule(LightningModule, ABC):
         n_coeff = self.hparams.n_coeff
         self.kl_coeff = self.hparams.kl_coeff
 
-        self.encoder = NeuralRtiEncoder(n_coeff, n_lights)
-        self.decoder = NeuralRtiDecoder(n_coeff)
+        self.encoder = NeuralRtiEncoderVae(n_coeff, n_lights)
+        self.decoder = NeuralRtiDecoderVae(n_coeff)
 
-        self.fc_mu = nn.Linear(n_coeff, n_coeff)
+        self.fc_mu  = nn.Linear(n_coeff, n_coeff)
         self.fc_var = nn.Linear(n_coeff, n_coeff)
         # self.automatic_optimization = False
 
@@ -33,13 +33,19 @@ class NrtiVaeModule(LightningModule, ABC):
 
     def _run_step(self, ray_batch, dirs_batch):
         x = self.encoder(ray_batch)
-        mu = self.fc_mu(x)
-        log_var = self.fc_var(x)
+        # x = torch.cat([x, dirs_batch], dim=-1)
+
+        mu = self.fc_mu(x.view(-1, 2, 9)[:, 0])
+        log_var = self.fc_var(x.view(-1, 2, 9)[:, 1])
         p, q, z = self.sample(mu, log_var)
-        return z, self.decoder(z, dirs_batch), p, q
+        embedding = torch.cat([z, dirs_batch], dim=-1)
+
+        return z, self.decoder(embedding), p, q
 
     def sample(self, mu, log_var):
-        std = torch.exp(log_var / 2)
+        # std = torch.exp(log_var / 2)
+        std = torch.exp(log_var)
+
         p = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(std))
         q = torch.distributions.Normal(mu, std)
         z = q.rsample()
@@ -56,8 +62,7 @@ class NrtiVaeModule(LightningModule, ABC):
 
         z, rgb_pred, p, q = self._run_step(ray_batch, dirs_batch)
 
-        recon_loss = torch.nn.functional.mse_loss(rgb_pred, gt_batch)
-        # recon_loss = torch.nn.functional.mse_loss(rgb_pred, gt_batch, reduction=self.hparams.reduction)
+        recon_loss = torch.nn.functional.mse_loss(rgb_pred, gt_batch, reduction=self.hparams.reduction)
 
         log_qz = q.log_prob(z)
         log_pz = p.log_prob(z)
@@ -101,16 +106,29 @@ class NrtiVaeModule(LightningModule, ABC):
                  )).contiguous()
 
             rgb_out = []
+            z_col = []
             for ray in imgV:
                 ray = ray.unsqueeze(0)
 
                 x = self.encoder(ray)
-                mu = self.fc_mu(x)
-                log_var = self.fc_var(x)
+
+                # x = torch.cat([x, l_dir], dim=-1)
+
+
+                # mu = self.fc_mu(x)
+                # log_var = self.fc_var(x)
+                mu = self.fc_mu(x.view(-1, 2, 9)[:, 0])
+                log_var = self.fc_var(x.view(-1, 2, 9)[:, 1])
                 p, q, z = self.sample(mu, log_var)
 
-                rgb = self.decoder(z, l_dir)  # shouldn't squeeze, but keep batch dim of IV
+                z = torch.cat([z, l_dir], dim=-1)
+
+                rgb = self.decoder(z)  # shouldn't squeeze, but keep batch dim of IV
                 rgb_out += [rgb]
+                # z_col += [z]
+                # wandb.log({"eval_embeddings": wandb.Histogram(z.cpu().detach())})
+
+            # z_col = torch.stack(z_col)
 
             pred_img = torch.stack(rgb_out)
             pred_img = pred_img.view(LpDataset.img_wh[1], LpDataset.img_wh[0], 3)

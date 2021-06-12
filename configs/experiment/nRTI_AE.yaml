@@ -17,7 +17,7 @@ seed: 12345
 
 model:
   _target_: src.models.neuralrti_model.NeuralRtiModule
-  n_lights: 200
+  n_lights: 60
   n_coeff: 9
   lr: 1e-5
   optimizer: "radam"
@@ -25,8 +25,8 @@ model:
   lr_scheduler: 'plateau'
   monitor: 'val_psnr'
   interval: 'epoch'
-  patience: 1
-  factor: 0.2
+  patience: 5
+  factor: 0.9
   eps: 1e-8
   min_lr: 1e-8
   sch_freq: 1
@@ -38,11 +38,17 @@ trainer:
   _target_: pytorch_lightning.Trainer
   gpus: 1
   min_epochs: 1
-  max_epochs: 10
+  max_epochs: 100
   gradient_clip_val: 0.5
   fast_dev_run: False
 
 logger:
+#  csv:
+#    _target_: pytorch_lightning.loggers.csv_logs.CSVLogger
+#    save_dir: "."
+#    name: "csv/"
+#    version: null
+#    prefix: ""
   wandb:
     _target_: pytorch_lightning.loggers.wandb.WandbLogger
     project: "neuralRTI"
@@ -51,7 +57,7 @@ logger:
     offline: False # set True to store all logs only locally
     id: null # pass correct id to resume experiment!
     # entity: ""  # set to name of your wandb team or just remove it
-    log_model: False
+    log_model: True
     prefix: ""
     job_type: "train"
     group: ""
@@ -72,21 +78,28 @@ callbacks:
   early_stopping:
     _target_: pytorch_lightning.callbacks.EarlyStopping
     monitor: "val_psnr" # name of the logged metric which determines when model is improving
-    patience: 3 # how many epochs of not improving until training stops
+    patience: 100 # how many epochs of not improving until training stops
     mode: "max" # can be "max" or "min"
     min_delta: 0 # minimum change in the monitored metric needed to qualify as an improvement
+
+  watch_model:
+    _target_: src.callbacks.wandb_callbacks.WatchModel
+    log: "all"
+    log_freq: 100
 
 
 
 
 datamodule:
   _target_: src.datamodules.rti_datamodule.LpDataModule
-  data_dir: ${work_dir}/data
+#  data_dir: ${work_dir}/data
+  data_dir: /home/mag/RTI/exampledataset64/
+
   lp_name: "dirs.lp"
   batch_size: 64
   train_val_test_split:
     - 10
     - 2
-  num_workers: 8
+  num_workers: 0
   pin_memory: False
 

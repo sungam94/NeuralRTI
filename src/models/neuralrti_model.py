@@ -27,7 +27,7 @@ class NeuralRtiModule(LightningModule, ABC):
         rgb = self.decoder(self.encoder(ray), dir)
         return rgb
 
-    def training_step(self, batch, batch_idx):
+    def step(self, batch, batch_idx):
         # opt_enc, opt_dec = self.optimizers()
         dirs_batch, ray_batch, gt_batch = batch
         dirs_batch = dirs_batch[..., :2].squeeze()
@@ -41,14 +41,17 @@ class NeuralRtiModule(LightningModule, ABC):
 
         loss = torch.nn.functional.mse_loss(rgb_pred, gt_batch, reduction=self.hparams.reduction)
 
-        self.log('batch_loss', loss)
-        self.log("global_step", self.trainer.global_step)
-        self.log("lr", my_utils.get_learning_rate(self.trainer.optimizers[0]))
-        return {"loss": loss}
+        logs = {
+            "recon_loss": loss,
+            "loss": loss,
+            "lr": my_utils.get_learning_rate(self.trainer.optimizers[0])
+        }
+        return loss, logs
 
-    # def on_train_batch_end(self, outputs, batch, batch_idx: int, dataloader_idx: int) -> None:
-
-
+    def training_step(self, batch, batch_idx):
+        loss, logs = self.step(batch, batch_idx)
+        self.log_dict({f"train_{k}": v for k, v in logs.items()}, on_step=True, on_epoch=False)
+        return loss
 
     def validation_step(self, batch, batch_idx):
         val_loss = []

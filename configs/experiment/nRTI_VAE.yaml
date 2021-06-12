@@ -19,18 +19,18 @@ model:
   _target_: src.models.nRTI_VAE_model.NrtiVaeModule
   n_lights: 200
   n_coeff: 9
-  kl_coeff: 0.03
-  lr: 1e-3
+  kl_coeff: 1e-10
+  lr: 1e-4
   optimizer: "radam"
   weight_decay: 0.995
   lr_scheduler: 'plateau'
   monitor: 'val_psnr'
   interval: 'epoch'
-  patience: 1
-  factor: 0.2
+  patience: 2
+  factor: 0.5
   eps: 1e-8
   min_lr: 1e-8
-  sch_freq: 10
+  sch_freq: 1
   warmup_epochs: 1
   reduction: 'mean'
 
@@ -39,9 +39,10 @@ trainer:
   _target_: pytorch_lightning.Trainer
   gpus: 1
   min_epochs: 1
-  max_epochs: 100
-#  gradient_clip_val: 0.5
+  max_epochs: 400
+  gradient_clip_val: 0.5
   fast_dev_run: False
+#  optimized_metric: "train_loss"
 
 logger:
 #  csv:
@@ -79,7 +80,7 @@ callbacks:
   early_stopping:
     _target_: pytorch_lightning.callbacks.EarlyStopping
     monitor: "val_psnr" # name of the logged metric which determines when model is improving
-    patience: 20 # how many epochs of not improving until training stops
+    patience: 100 # how many epochs of not improving until training stops
     mode: "max" # can be "max" or "min"
     min_delta: 0 # minimum change in the monitored metric needed to qualify as an improvement
 
@@ -98,6 +99,6 @@ datamodule:
   train_val_test_split:
     - 10
     - 2
-  num_workers: 8
-  pin_memory: False
+  num_workers: 0
+  pin_memory: True
 
