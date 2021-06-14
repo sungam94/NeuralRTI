@@ -4,7 +4,7 @@ import colour
 import matplotlib.pyplot as plt
 import torch
 import torchvision as tv
-import Ranger
+import pytorch-ranger
 # optimizer
 from torch.optim import SGD, Adam
 # scheduler
