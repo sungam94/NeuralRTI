@@ -3,7 +3,7 @@ torch==1.8.1
 torchvision==0.9.1
 pytorch-lightning>=1.3.2
 torchmetrics>=0.3.2
-pytorc-ranger
+pytorch-ranger
 
 # --------- hydra --------- #
 hydra-core==1.1.0.rc1
