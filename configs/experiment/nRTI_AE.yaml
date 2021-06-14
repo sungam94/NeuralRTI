@@ -93,7 +93,7 @@ callbacks:
 datamodule:
   _target_: src.datamodules.rti_datamodule.LpDataModule
 #  data_dir: ${work_dir}/data
-  data_dir: /home/mag/RTI/exampledataset64/
+  data_dir: data/
 
   lp_name: "dirs.lp"
   batch_size: 64
