@@ -26,10 +26,10 @@ isort
 flake8
 
 # --------- others --------- #
-jupyterlab
+# jupyterlab
 python-dotenv
 rich
-pytest
+pytest 
 sh
 scikit-learn
 seaborn
